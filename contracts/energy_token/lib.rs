@@ -1,4 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+#![allow(clippy::cast_possible_truncation)]
 
 use ink::storage::Mapping;
 
@@ -24,6 +25,7 @@ mod energy_token {
         Unauthorized,
         InsufficientBalance,
         InvalidAmount,
+        Overflow,
     }
 
     /// Evento de emissão
@@ -40,7 +42,6 @@ mod energy_token {
     pub struct Transferred {
         #[ink(topic)]
         from: AccountId,
-        #[ink(topic)]
         to: AccountId,
         amount: u128,
     }
@@ -91,8 +92,15 @@ mod energy_token {
             }
 
             let balance = self.balance_of(to);
-            self.balances.insert(to, &(balance + amount));
-            self.total_supply += amount;
+            let new_balance = balance
+                .checked_add(amount)
+                .ok_or(EnergyError::InvalidAmount)?;
+
+            self.balances.insert(to, &new_balance);
+
+            self.total_supply = self.total_supply
+                .checked_add(amount)
+                .ok_or(EnergyError::InvalidAmount)?;
 
             self.env().emit_event(Minted {
                 to,
@@ -103,50 +111,65 @@ mod energy_token {
             Ok(())
         }
 
-        /// Transferência de tokens
+        /// Transferência de kWh
         #[ink(message)]
         pub fn transfer_kwh(
             &mut self,
             to: AccountId,
             amount: u128,
         ) -> Result<(), EnergyError> {
-
             let from = self.env().caller();
-            let from_balance = self.balance_of(from);
+            if amount == 0 {
+                return Err(EnergyError::InvalidAmount);
+            }
 
-            if amount == 0 || from_balance < amount {
+            let from_balance = self.balance_of(from);
+            if from_balance < amount {
                 return Err(EnergyError::InsufficientBalance);
             }
 
-            self.balances.insert(from, &(from_balance - amount));
             let to_balance = self.balance_of(to);
-            self.balances.insert(to, &(to_balance + amount));
 
-            self.env().emit_event(Transferred {
-                from,
-                to,
-                amount,
-            });
+            let new_from = from_balance
+                .checked_sub(amount)
+                .ok_or(EnergyError::Overflow)?;
+
+            let new_to = to_balance
+                .checked_add(amount)
+                .ok_or(EnergyError::Overflow)?;
+
+            self.balances.insert(from, &new_from);
+            self.balances.insert(to, &new_to);
+
+            self.env().emit_event(Transferred { from, to, amount });
 
             Ok(())
         }
 
-        /// Queima de tokens (consumo de energia)
+        /// Queima de kWh
         #[ink(message)]
-        pub fn burn_kwh(
-            &mut self,
-            amount: u128,
-        ) -> Result<(), EnergyError> {
-
+        pub fn burn_kwh(&mut self, amount: u128) -> Result<(), EnergyError> {
             let caller = self.env().caller();
-            let balance = self.balance_of(caller);
+            if amount == 0 {
+                return Err(EnergyError::InvalidAmount);
+            }
 
-            if amount == 0 || balance < amount {
+            let balance = self.balance_of(caller);
+            if balance < amount {
                 return Err(EnergyError::InsufficientBalance);
             }
 
-            self.balances.insert(caller, &(balance - amount));
-            self.total_supply -= amount;
+            let new_balance = balance
+                .checked_sub(amount)
+                .ok_or(EnergyError::Overflow)?;
+
+            let new_supply = self
+                .total_supply
+                .checked_sub(amount)
+                .ok_or(EnergyError::Overflow)?;
+
+            self.balances.insert(caller, &new_balance);
+            self.total_supply = new_supply;
 
             self.env().emit_event(Burned {
                 from: caller,
