@@ -1,4 +1,4 @@
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(not(feature = "std"), no_std, no_main)]
 #![allow(clippy::cast_possible_truncation)]
 
 use ink::storage::Mapping;
@@ -239,4 +239,5 @@ mod energy_token {
             assert_eq!(token.balance_of(accounts.alice), 20);
         }
     }
+
 }

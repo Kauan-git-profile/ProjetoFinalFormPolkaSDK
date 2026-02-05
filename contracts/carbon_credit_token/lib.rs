@@ -1,4 +1,4 @@
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(not(feature = "std"), no_std,  no_main)]
 #![allow(clippy::cast_possible_truncation)]
 
 use ink::storage::Mapping;
@@ -222,4 +222,55 @@ mod carbon_credit_token {
             self.authority
         }
     }
+
+
+    // -------------------------
+    // Testes unitários
+    // -------------------------
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use ink::env::test;
+
+        fn accounts() -> test::DefaultAccounts<ink::env::DefaultEnvironment> {
+            test::default_accounts::<ink::env::DefaultEnvironment>()
+        }
+
+        #[ink::test]
+        fn mint_credit_works() {
+            let acc = accounts();
+            let mut token = CarbonCreditToken::new(acc.alice);
+
+            assert_eq!(
+                token.mint_credit(acc.bob, 100, 1),
+                Ok(())
+            );
+            assert_eq!(token.balance_of(acc.bob), 100);
+            assert_eq!(token.total_supply(), 100);
+        }
+
+        #[ink::test]
+        fn transfer_credit_works() {
+            let acc = accounts();
+            let mut token = CarbonCreditToken::new(acc.alice);
+
+            token.mint_credit(acc.alice, 50, 1).unwrap();
+            assert_eq!(token.transfer_credit(acc.bob, 20), Ok(()));
+            assert_eq!(token.balance_of(acc.bob), 20);
+        }
+
+        #[ink::test]
+        fn retire_credit_works() {
+            let acc = accounts();
+            let mut token = CarbonCreditToken::new(acc.alice);
+
+            token.mint_credit(acc.alice, 40, 1).unwrap();
+            let reason = Hash::from([0x01; 32]);
+
+            assert_eq!(token.retire_credit(15, reason), Ok(()));
+            assert_eq!(token.balance_of(acc.alice), 25);
+            assert_eq!(token.retired_supply(), 15);
+        }
+    }
+
 }

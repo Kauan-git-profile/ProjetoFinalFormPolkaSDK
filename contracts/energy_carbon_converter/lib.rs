@@ -1,4 +1,4 @@
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(not(feature = "std"), no_std,  no_main)]
 #![allow(clippy::cast_possible_truncation)]
 
 use ink::env::call::{build_call, ExecutionInput};
@@ -163,4 +163,72 @@ mod energy_carbon_converter {
             (self.energy_token, self.carbon_token)
         }
     }
+
+
+    // -------------------------
+    // Testes unitários
+    // -------------------------
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use ink::env::test;
+
+        fn accounts() -> test::DefaultAccounts<ink::env::DefaultEnvironment> {
+            test::default_accounts::<ink::env::DefaultEnvironment>()
+        }
+
+        #[ink::test]
+        fn replay_is_blocked() {
+            let acc = accounts();
+
+            let mut converter = EnergyCarbonConverter::new(
+                acc.alice,
+                acc.bob,
+                1,
+            );
+
+            // marca nonce como usado
+            converter.used_nonces.insert((acc.charlie, 1), &true);
+
+            test::set_caller::<ink::env::DefaultEnvironment>(acc.charlie);
+
+            assert_eq!(
+                converter.convert(10, 1),
+                Err(ConvertError::Replay)
+            );
+        }
+
+        #[ink::test]
+        fn zero_amount_fails() {
+            let acc = accounts();
+            let mut converter = EnergyCarbonConverter::new(
+                acc.alice,
+                acc.bob,
+                1,
+            );
+
+            assert_eq!(
+                converter.convert(0, 0),
+                Err(ConvertError::InvalidAmount)
+            );
+        }
+
+        #[ink::test]
+        fn invalid_amount_is_detected() {
+            let acc = accounts();
+            let mut converter = EnergyCarbonConverter::new(
+                acc.alice,
+                acc.bob,
+                u128::MAX,
+            );
+
+            assert_eq!(
+                converter.convert(0, 0),
+                Err(ConvertError::InvalidAmount)
+            );
+        }
+
+    }
+
+
 }
