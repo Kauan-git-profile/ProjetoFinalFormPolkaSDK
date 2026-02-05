@@ -1,7 +1,9 @@
 [workspace]
 members = [
+    "crates/energy-types",
     "contracts/energy_token",
-    "contracts/carbon_credit_token",
     "contracts/energy_carbon_converter",
+    "contracts/carbon_credit_token",
 ]
+
 resolver = "2"

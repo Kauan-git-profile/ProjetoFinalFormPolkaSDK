@@ -2,33 +2,29 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use ink::storage::Mapping;
+use energy_types::EnergySource;
 
 #[ink::contract]
 mod energy_token {
-
     use super::*;
 
-    /// Fonte de energia
-    #[derive(scale::Encode, scale::Decode, Clone, Copy, Debug, PartialEq, Eq)]
-    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
-    pub enum EnergySource {
-        Solar,
-        Wind,
-        Biomass,
-        Hydro,
-    }
+    // -------------------------------------------------
+    // Tipos
+    // -------------------------------------------------
 
-    /// Erros do contrato
     #[derive(scale::Encode, scale::Decode, Debug, PartialEq, Eq)]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub enum EnergyError {
         Unauthorized,
-        InsufficientBalance,
         InvalidAmount,
+        InsufficientBalance,
         Overflow,
     }
 
-    /// Evento de emissão
+    // -------------------------------------------------
+    // Eventos
+    // -------------------------------------------------
+
     #[ink(event)]
     pub struct Minted {
         #[ink(topic)]
@@ -37,16 +33,15 @@ mod energy_token {
         source: EnergySource,
     }
 
-    /// Evento de transferência
     #[ink(event)]
     pub struct Transferred {
         #[ink(topic)]
         from: AccountId,
+        #[ink(topic)]
         to: AccountId,
         amount: u128,
     }
 
-    /// Evento de queima
     #[ink(event)]
     pub struct Burned {
         #[ink(topic)]
@@ -54,58 +49,73 @@ mod energy_token {
         amount: u128,
     }
 
+    // -------------------------------------------------
+    // Storage
+    // -------------------------------------------------
+
     #[ink(storage)]
     pub struct EnergyToken {
         balances: Mapping<AccountId, u128>,
         total_supply: u128,
         oracle: AccountId,
+        /// Fonte de energia associada a este token
+        source: EnergySource,
     }
 
-    impl EnergyToken {
+    // -------------------------------------------------
+    // Implementação
+    // -------------------------------------------------
 
+    impl EnergyToken {
         /// Construtor
+        ///
+        /// Cada instância do contrato representa
+        /// UMA fonte específica de energia.
         #[ink(constructor)]
-        pub fn new(oracle: AccountId) -> Self {
+        pub fn new(
+            oracle: AccountId,
+            source: EnergySource,
+        ) -> Self {
             Self {
                 balances: Mapping::default(),
                 total_supply: 0,
                 oracle,
+                source,
             }
         }
 
-        /// Emissão de kWh (somente oráculo autorizado)
+        /// Emissão de energia (kWh) — somente oracle
         #[ink(message)]
         pub fn mint_kwh(
             &mut self,
             to: AccountId,
             amount: u128,
-            source: EnergySource,
         ) -> Result<(), EnergyError> {
-
-            let caller = self.env().caller();
-            if caller != self.oracle {
+            if self.env().caller() != self.oracle {
                 return Err(EnergyError::Unauthorized);
             }
-
             if amount == 0 {
                 return Err(EnergyError::InvalidAmount);
             }
 
             let balance = self.balance_of(to);
+
             let new_balance = balance
                 .checked_add(amount)
-                .ok_or(EnergyError::InvalidAmount)?;
+                .ok_or(EnergyError::Overflow)?;
+
+            let new_supply = self
+                .total_supply
+                .checked_add(amount)
+                .ok_or(EnergyError::Overflow)?;
 
             self.balances.insert(to, &new_balance);
-
-            self.total_supply = self.total_supply
-                .checked_add(amount)
-                .ok_or(EnergyError::InvalidAmount)?;
+            self.total_supply = new_supply;
 
             self.env().emit_event(Minted {
                 to,
                 amount,
-                source,
+                source: self.source,
             });
 
             Ok(())
@@ -119,6 +129,7 @@ mod energy_token {
             amount: u128,
         ) -> Result<(), EnergyError> {
             let from = self.env().caller();
+
             if amount == 0 {
                 return Err(EnergyError::InvalidAmount);
             }
@@ -141,15 +152,25 @@ mod energy_token {
             self.balances.insert(from, &new_from);
             self.balances.insert(to, &new_to);
 
-            self.env().emit_event(Transferred { from, to, amount });
+            self.env().emit_event(Transferred {
+                from,
+                to,
+                amount,
+            });
 
             Ok(())
         }
 
-        /// Queima de kWh
+        /// Queima de energia (kWh)
+        ///
+        /// Usada pelo conversor para conversão em carbono
         #[ink(message)]
-        pub fn burn_kwh(&mut self, amount: u128) -> Result<(), EnergyError> {
+        pub fn burn_kwh(
+            &mut self,
+            amount: u128,
+        ) -> Result<(), EnergyError> {
             let caller = self.env().caller();
+
             if amount == 0 {
                 return Err(EnergyError::InvalidAmount);
             }
@@ -179,64 +200,241 @@ mod energy_token {
             Ok(())
         }
 
-        /// Consulta saldo
+        // -------------------------------------------------
+        // Getters
+        // -------------------------------------------------
+
+        /// Retorna o saldo de kWh de uma conta
         #[ink(message)]
         pub fn balance_of(&self, owner: AccountId) -> u128 {
             self.balances.get(owner).unwrap_or(0)
         }
 
-        /// Consulta supply total
+        /// Retorna o total de kWh emitidos
         #[ink(message)]
         pub fn total_supply(&self) -> u128 {
             self.total_supply
         }
 
-        /// Consulta oráculo
+        /// Retorna o oracle autorizado a emitir energia
         #[ink(message)]
         pub fn oracle(&self) -> AccountId {
             self.oracle
         }
+
+        /// Retorna a fonte de energia deste token
+        #[ink(message)]
+        pub fn source(&self) -> EnergySource {
+            self.source
+        }
     }
 
-    // -------------------------
-    // Testes unitários
-    // -------------------------
     #[cfg(test)]
     mod tests {
+        //! -------------------------------------------------
+        //! Testes Unitários — EnergyToken
+        //! -------------------------------------------------
+        //!
+        //! Estes testes validam a lógica interna do contrato
+        //! de tokenização de energia elétrica (kWh).
+        //!
+        //! Escopo dos testes unitários:
+        //! - Regras de autorização (oracle)
+        //! - Validação de parâmetros de entrada
+        //! - Atualização correta de saldos
+        //! - Atualização do total de energia emitida
+        //! - Persistência e exposição da fonte de energia
+        //!
+        //! Fora do escopo dos testes unitários:
+        //! - Conversão de energia em créditos de carbono
+        //! - Chamadas cross-contract
+        //! - Avaliação de custos ou desempenho
+        //!
+        //! Esses aspectos são tratados em testes de integração
+        //! (end-to-end) executados no `substrate-contracts-node`.
+
         use super::*;
         use ink::env::test;
 
+        /// Retorna um conjunto padrão de contas para os testes
+        fn accounts() -> test::DefaultAccounts<ink::env::DefaultEnvironment> {
+            test::default_accounts::<ink::env::DefaultEnvironment>()
+        }
+
+        /// Testa se o construtor inicializa corretamente
+        /// o oracle e a fonte de energia.
+        ///
+        /// Objetivo:
+        /// - Garantir que cada contrato representa
+        ///   uma única fonte de energia
+        /// - Validar a configuração inicial do estado
         #[ink::test]
-        fn mint_works() {
-            let accounts = test::default_accounts::<ink::env::DefaultEnvironment>();
-            let mut token = EnergyToken::new(accounts.alice);
+        fn constructor_sets_oracle_and_source() {
+            let acc = accounts();
+
+            let token = EnergyToken::new(
+                acc.alice,
+                EnergySource::Solar,
+            );
+
+            assert_eq!(token.oracle(), acc.alice);
+            assert_eq!(token.source(), EnergySource::Solar);
+            assert_eq!(token.total_supply(), 0);
+        }
+
+        /// Testa se a emissão de energia (mint) funciona
+        /// quando chamada pelo oracle autorizado.
+        ///
+        /// Objetivo:
+        /// - Validar controle de acesso
+        /// - Garantir atualização correta de saldo e supply
+        #[ink::test]
+        fn mint_by_oracle_works() {
+            let acc = accounts();
+            let mut token = EnergyToken::new(
+                acc.alice,
+                EnergySource::Wind,
+            );
 
             assert_eq!(
-                token.mint_kwh(accounts.bob, 100, EnergySource::Solar),
+                token.mint_kwh(acc.bob, 100),
                 Ok(())
             );
 
-            assert_eq!(token.balance_of(accounts.bob), 100);
+            assert_eq!(token.balance_of(acc.bob), 100);
+            assert_eq!(token.total_supply(), 100);
         }
 
+        /// Testa se a emissão de energia falha
+        /// quando chamada por uma conta não autorizada.
+        ///
+        /// Objetivo:
+        /// - Garantir que apenas o oracle pode emitir energia
         #[ink::test]
-        fn transfer_works() {
-            let accounts = test::default_accounts::<ink::env::DefaultEnvironment>();
-            let mut token = EnergyToken::new(accounts.alice);
+        fn mint_by_non_oracle_fails() {
+            let acc = accounts();
+            let mut token = EnergyToken::new(
+                acc.alice,
+                EnergySource::Hydro,
+            );
 
-            token.mint_kwh(accounts.alice, 50, EnergySource::Wind).unwrap();
-            assert_eq!(token.transfer_kwh(accounts.bob, 20), Ok(()));
-            assert_eq!(token.balance_of(accounts.bob), 20);
+            // Define o chamador como alguém diferente do oracle
+            test::set_caller::<ink::env::DefaultEnvironment>(acc.bob);
+
+            assert_eq!(
+                token.mint_kwh(acc.bob, 50),
+                Err(EnergyError::Unauthorized)
+            );
         }
 
+        /// Testa se a transferência de energia entre contas
+        /// atualiza corretamente os saldos.
+        ///
+        /// Objetivo:
+        /// - Validar movimentação de kWh
+        /// - Garantir preservação do total_supply
         #[ink::test]
-        fn burn_works() {
-            let accounts = test::default_accounts::<ink::env::DefaultEnvironment>();
-            let mut token = EnergyToken::new(accounts.alice);
+        fn transfer_kwh_works() {
+            let acc = accounts();
+            let mut token = EnergyToken::new(
+                acc.alice,
+                EnergySource::Solar,
+            );
 
-            token.mint_kwh(accounts.alice, 30, EnergySource::Hydro).unwrap();
-            assert_eq!(token.burn_kwh(10), Ok(()));
-            assert_eq!(token.balance_of(accounts.alice), 20);
+            token.mint_kwh(acc.alice, 80).unwrap();
+
+            assert_eq!(
+                token.transfer_kwh(acc.bob, 30),
+                Ok(())
+            );
+
+            assert_eq!(token.balance_of(acc.alice), 50);
+            assert_eq!(token.balance_of(acc.bob), 30);
+            assert_eq!(token.total_supply(), 80);
+        }
+
+        /// Testa se a transferência falha quando
+        /// o saldo é insuficiente.
+        ///
+        /// Objetivo:
+        /// - Evitar saldos negativos
+        /// - Garantir consistência do estado
+        #[ink::test]
+        fn transfer_fails_with_insufficient_balance() {
+            let acc = accounts();
+            let mut token = EnergyToken::new(
+                acc.alice,
+                EnergySource::Biomass,
+            );
+
+            assert_eq!(
+                token.transfer_kwh(acc.bob, 10),
+                Err(EnergyError::InsufficientBalance)
+            );
+        }
+
+        /// Testa se a queima de energia (burn)
+        /// reduz corretamente o saldo e o total emitido.
+        ///
+        /// Objetivo:
+        /// - Garantir que kWh convertidos sejam removidos
+        /// - Preparar corretamente o fluxo de conversão
+        #[ink::test]
+        fn burn_kwh_works() {
+            let acc = accounts();
+            let mut token = EnergyToken::new(
+                acc.alice,
+                EnergySource::Solar,
+            );
+
+            token.mint_kwh(acc.alice, 60).unwrap();
+
+            assert_eq!(
+                token.burn_kwh(25),
+                Ok(())
+            );
+
+            assert_eq!(token.balance_of(acc.alice), 35);
+            assert_eq!(token.total_supply(), 35);
+        }
+
+        /// Testa se a queima falha quando
+        /// o valor solicitado é inválido.
+        ///
+        /// Objetivo:
+        /// - Validar parâmetros de entrada
+        #[ink::test]
+        fn burn_fails_with_zero_amount() {
+            let acc = accounts();
+            let mut token = EnergyToken::new(
+                acc.alice,
+                EnergySource::Solar,
+            );
+
+            assert_eq!(
+                token.burn_kwh(0),
+                Err(EnergyError::InvalidAmount)
+            );
+        }
+
+        /// Testa os getters do contrato.
+        ///
+        /// Objetivo:
+        /// - Garantir que funções de leitura
+        ///   retornem valores consistentes
+        /// - Facilitar auditoria e integração off-chain
+        #[ink::test]
+        fn getters_work_correctly() {
+            let acc = accounts();
+            let token = EnergyToken::new(
+                acc.alice,
+                EnergySource::Hydro,
+            );
+
+            assert_eq!(token.oracle(), acc.alice);
+            assert_eq!(token.source(), EnergySource::Hydro);
+            assert_eq!(token.balance_of(acc.bob), 0);
+            assert_eq!(token.total_supply(), 0);
         }
     }
 
