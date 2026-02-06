@@ -1,7 +1,14 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 #![allow(clippy::cast_possible_truncation)]
 
-use ink::env::call::{build_call, ExecutionInput};
+use ink::env::{
+    call::{
+        build_call,
+        ExecutionInput,
+        Selector,
+    },
+    DefaultEnvironment,
+};
 use ink::storage::Mapping;
 use energy_types::EnergySource;
 
@@ -33,6 +40,9 @@ mod energy_carbon_converter {
         SourceQueryFailed,
         BurnFailed,
         MintFailed,
+        CarbonTokenNotSet,
+        CarbonTokenAlreadySet,
+        Unauthorized,
     }
 
     // -------------------------------------------------
@@ -55,151 +65,152 @@ mod energy_carbon_converter {
 
     #[ink(storage)]
     pub struct EnergyCarbonConverter {
+        /// Endereço do contrato EnergyToken
         energy_token: AccountId,
-        carbon_token: AccountId,
-        /// fatores padrão por fonte (EnergySource as u8)
-        default_factors: Mapping<u8, u128>,
+        /// Endereço do contrato CarbonCreditToken (configurado depois)
+        carbon_token: Option<AccountId>,
+        /// Dono do conversor (governança mínima)
+        owner: AccountId,
+        /// Proteção contra replay (caller, nonce)
         used_nonces: Mapping<(AccountId, u64), bool>,
+        /// Fatores de emissão por fonte (ponto fixo)
+        factors: Mapping<EnergySource, u128>,
     }
-
     // -------------------------------------------------
     // Implementação
     // -------------------------------------------------
 
     impl EnergyCarbonConverter {
-        /// Construtor
-        /// Inicializa fatores padrão por fonte (escala 10^6)
+        /// Construtor: cria o conversor apenas com o EnergyToken
         #[ink(constructor)]
-        pub fn new(
-            energy_token: AccountId,
-            carbon_token: AccountId,
-        ) -> Self {
-            let mut default_factors = Mapping::default();
+        pub fn new(energy_token: AccountId) -> Self {
+            let caller = Self::env().caller();
+            let mut factors = Mapping::default();
 
-            // Fatores exemplificativos (kgCO₂/kWh × 10^6)
-            default_factors.insert(EnergySource::Solar as u8, &45_000);
-            default_factors.insert(EnergySource::Wind as u8, &12_000);
-            default_factors.insert(EnergySource::Hydro as u8, &84_000);
-            default_factors.insert(EnergySource::Biomass as u8, &230_000);
+            // Fatores padrão (tCO2/kWh * SCALE)
+            factors.insert(EnergySource::Solar, &600);    // 0,0006
+            factors.insert(EnergySource::Wind, &500);     // 0,0005
+            factors.insert(EnergySource::Hydro, &400);    // 0,0004
+            factors.insert(EnergySource::Biomass, &800);  // 0,0008
 
             Self {
                 energy_token,
-                carbon_token,
-                default_factors,
+                carbon_token: None,
+                owner: caller,
                 used_nonces: Mapping::default(),
+                factors,
             }
         }
 
-        /// Conversão de kWh → créditos de carbono
+        /// Setter protegido para registrar o CarbonCreditToken
+        #[ink(message)]
+        pub fn set_carbon_token(&mut self, carbon_token: AccountId) -> Result<(), ConvertError> {
+            if self.env().caller() != self.owner {
+                return Err(ConvertError::Unauthorized);
+            }
+
+            if self.carbon_token.is_some() {
+                return Err(ConvertError::CarbonTokenAlreadySet);
+            }
+
+            self.carbon_token = Some(carbon_token);
+            Ok(())
+        }
+
+        /// Conversão de kWh para créditos de carbono
         ///
         /// A fonte de energia é consultada diretamente
         /// no contrato EnergyToken.
+        /// Converte energia (kWh) em créditos de carbono
         #[ink(message)]
-        pub fn convert(
-            &mut self,
-            kwh_amount: u128,
-            nonce: u64,
-        ) -> Result<(), ConvertError> {
-            let caller = self.env().caller();
-
-            // -----------------------------
-            // Checks
-            // -----------------------------
-
+        pub fn convert(&mut self, kwh_amount: u128, nonce: u64) -> Result<(), ConvertError> {
             if kwh_amount == 0 {
                 return Err(ConvertError::InvalidAmount);
             }
 
+            let caller = self.env().caller();
+
+            // Proteção contra replay
             if self.used_nonces.get((caller, nonce)).unwrap_or(false) {
                 return Err(ConvertError::Replay);
             }
 
-            // -----------------------------
-            // Consulta da fonte no EnergyToken
-            // -----------------------------
+            let carbon_token = match self.carbon_token {
+                Some(addr) => addr,
+                None => return Err(ConvertError::CarbonTokenNotSet),
+            };
 
-            let source: EnergySource = build_call::<ink::env::DefaultEnvironment>()
+            // 1 Consultar fonte da energia
+            let source_call = build_call::<DefaultEnvironment>()
                 .call(self.energy_token)
                 .exec_input(
                     ExecutionInput::new(
-                        ink::selector_bytes!("source").into()
-                    )
+                        Selector::new(ink::selector_bytes!("source")),
+                    ),
                 )
                 .returns::<EnergySource>()
-                .try_invoke()
-                .map_err(|_| ConvertError::SourceQueryFailed)?
-                .unwrap();
+                .try_invoke();
 
+            let source = match source_call {
+                Ok(Ok(value)) => value,
+                _ => return Err(ConvertError::SourceQueryFailed),
+            };
 
+            // 2 Obter fator de emissão
             let factor = self
-                .default_factors
-                .get(source as u8)
+                .factors
+                .get(source)
                 .ok_or(ConvertError::MissingFactor)?;
 
-            // -----------------------------
-            // Burn no EnergyToken
-            // -----------------------------
-
-            let burn_result = build_call::<ink::env::DefaultEnvironment>()
+            // 3 Queimar energia
+            let burn_call = build_call::<DefaultEnvironment>()
                 .call(self.energy_token)
                 .exec_input(
                     ExecutionInput::new(
-                        ink::selector_bytes!("burn_kwh").into()
+                        Selector::new(ink::selector_bytes!("burn_from")),
                     )
+                    .push_arg(caller)
                     .push_arg(kwh_amount),
                 )
                 .returns::<Result<(), ()>>()
-                .invoke();
+                .try_invoke();
 
-            if burn_result.is_err() {
-                return Err(ConvertError::BurnFailed);
+            match burn_call {
+                Ok(Ok(Ok(()))) => {}
+                _ => return Err(ConvertError::BurnFailed),
             }
 
-            // -----------------------------
-            // Cálculo fracionário seguro
-            // carbon = (kwh * factor) / SCALE
-            // -----------------------------
-
+            // 4 Calcular créditos de carbono (ponto fixo)
             let carbon_amount = kwh_amount
                 .checked_mul(factor)
-                .ok_or(ConvertError::Overflow)?
-                .checked_div(SCALE)
-                .ok_or(ConvertError::Overflow)?;
+                .ok_or(ConvertError::MissingFactor)?
+                / SCALE;
 
-            // -----------------------------
-            // Mint no CarbonCreditToken
-            // -----------------------------
+            if carbon_amount == 0 {
+                return Err(ConvertError::MissingFactor);
+            }
 
-            let mint_result = build_call::<ink::env::DefaultEnvironment>()
-                .call(self.carbon_token)
+            // 5 Emitir créditos de carbono
+            let mint_call = build_call::<DefaultEnvironment>()
+                .call(carbon_token)
                 .exec_input(
                     ExecutionInput::new(
-                        ink::selector_bytes!("mint_credit").into()
+                        Selector::new(ink::selector_bytes!("mint_credit")),
                     )
                     .push_arg(caller)
                     .push_arg(carbon_amount)
-                    .push_arg(1u64), // project_id (exemplo)
+                    .push_arg(1u64),
                 )
                 .returns::<Result<(), ()>>()
-                .invoke();
+                .try_invoke();
 
-            if mint_result.is_err() {
-                return Err(ConvertError::MintFailed);
+            match mint_call {
+                Ok(Ok(Ok(()))) => {}
+                _ => return Err(ConvertError::MintFailed),
             }
 
-            // -----------------------------
-            // Effects
-            // -----------------------------
-
+            // 6️⃣ Consumir nonce
             self.used_nonces.insert((caller, nonce), &true);
-
-            self.env().emit_event(Converted {
-                user: caller,
-                source,
-                kwh_burned: kwh_amount,
-                carbon_minted: carbon_amount,
-                factor_used: factor,
-            });
 
             Ok(())
         }
@@ -208,24 +219,28 @@ mod energy_carbon_converter {
         // Getters
         // -------------------------------------------------
 
-        /// Retorna o fator padrão (escalado) para uma fonte
+        // Retorna o fator padrão (escalado) para uma fonte
         #[ink(message)]
         pub fn default_factor(&self, source: EnergySource) -> u128 {
-            self.default_factors
-                .get(source as u8)
-                .unwrap_or(0)
+            self.factors.get(source).unwrap_or(0)
         }
 
-        /// Retorna os contratos integrados
+        // Retorna os contratos integrados
         #[ink(message)]
-        pub fn contracts(&self) -> (AccountId, AccountId) {
+        pub fn contracts(&self) -> (AccountId, Option<AccountId>) {
             (self.energy_token, self.carbon_token)
         }
 
-        /// Retorna a escala usada no ponto fixo
+        // Retorna a escala usada no ponto fixo
         #[ink(message)]
         pub fn scale(&self) -> u128 {
             SCALE
+        }
+
+        // Retorna o dono do contrato
+        #[ink(message)]
+        pub fn owner(&self) -> AccountId {
+            self.owner
         }
     }
 
@@ -243,7 +258,7 @@ mod energy_carbon_converter {
         //! - Chamadas cross-contract (EnergyToken, CarbonCreditToken)
         //!   NÃO são executáveis em testes unitários.
         //! - Portanto, testes que envolvem `build_call`,
-        //!   `try_invoke`, `burn_kwh` ou `mint_credit`
+        //!   `try_invoke`, `burn_from` ou `mint_credit`
         //!   são avaliados apenas em testes de integração (e2e).
         //!
         //! Os testes abaixo cobrem:

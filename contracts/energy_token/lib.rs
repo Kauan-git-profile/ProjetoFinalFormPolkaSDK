@@ -55,11 +55,16 @@ mod energy_token {
 
     #[ink(storage)]
     pub struct EnergyToken {
-        balances: Mapping<AccountId, u128>,
-        total_supply: u128,
+        /// Conta autorizada a emitir energia (oracle)
         oracle: AccountId,
-        /// Fonte de energia associada a este token
+        /// Contrato autorizado a queimar energia por delegação
+        converter: AccountId,
+        /// Fonte da energia (Solar, Wind, etc.)
         source: EnergySource,
+        /// Saldo de energia por conta (kWh)
+        balances: Mapping<AccountId, u128>,
+        /// Total de energia emitida (kWh)
+        total_supply: u128,
     }
 
     // -------------------------------------------------
@@ -74,13 +79,15 @@ mod energy_token {
         #[ink(constructor)]
         pub fn new(
             oracle: AccountId,
+            converter: AccountId,
             source: EnergySource,
         ) -> Self {
             Self {
+                oracle,
+                converter,
+                source,
                 balances: Mapping::default(),
                 total_supply: 0,
-                oracle,
-                source,
             }
         }
 
@@ -200,17 +207,66 @@ mod energy_token {
             Ok(())
         }
 
+        // burn por delegação, para permitir ao EnergyCarbonConverter::convert executar a queima para outro usuario
+        #[ink(message)]
+        pub fn burn_from(
+            &mut self,
+            owner: AccountId,
+            amount: u128,
+        ) -> Result<(), EnergyError> {
+            let caller = self.env().caller();
+
+            // Apenas o conversor pode queimar por delegação
+            if caller != self.converter {
+                return Err(EnergyError::Unauthorized);
+            }
+
+            let balance = self.balances.get(owner).unwrap_or(0);
+            if balance < amount {
+                return Err(EnergyError::InsufficientBalance);
+            }
+
+            let new_balance = balance
+                .checked_sub(amount)
+                .ok_or(EnergyError::Overflow)?;
+
+            let new_supply = self
+                .total_supply
+                .checked_sub(amount)
+                .ok_or(EnergyError::Overflow)?;
+
+            self.balances.insert(owner, &new_balance);
+            self.total_supply = new_supply;
+
+            self.env().emit_event(Burned {
+                from: caller,
+                amount,
+            });
+
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn set_converter(&mut self, converter: AccountId) -> Result<(), EnergyError> {
+            if self.env().caller() != self.oracle {
+                return Err(EnergyError::Unauthorized);
+            }
+            self.converter = converter;
+            Ok(())
+        }
+
+
         // -------------------------------------------------
         // Getters
         // -------------------------------------------------
 
-        /// Retorna o saldo de kWh de uma conta
+        // Retorna o saldo de kWh de uma conta
         #[ink(message)]
         pub fn balance_of(&self, owner: AccountId) -> u128 {
             self.balances.get(owner).unwrap_or(0)
         }
 
-        /// Retorna o total de kWh emitidos
+        // Retorna o total de kWh emitidos
         #[ink(message)]
         pub fn total_supply(&self) -> u128 {
             self.total_supply
@@ -222,7 +278,13 @@ mod energy_token {
             self.oracle
         }
 
-        /// Retorna a fonte de energia deste token
+        // conversor autorizad: EnergyCarbonConverter
+        #[ink(message)]
+        pub fn converter(&self) -> AccountId {
+            self.converter
+        }
+
+        // Retorna a fonte de energia deste token
         #[ink(message)]
         pub fn source(&self) -> EnergySource {
             self.source
