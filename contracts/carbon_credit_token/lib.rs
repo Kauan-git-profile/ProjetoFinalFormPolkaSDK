@@ -62,7 +62,7 @@ mod carbon_credit_token {
         balances: Mapping<AccountId, u128>,
         total_supply: u128,
         retired_supply: u128,
-        authority: AccountId,
+        converter: AccountId,
     }
 
     // -------------------------------------------------
@@ -72,12 +72,12 @@ mod carbon_credit_token {
     impl CarbonCreditToken {
         /// Construtor
         #[ink(constructor)]
-        pub fn new(authority: AccountId) -> Self {
+        pub fn new(converter: AccountId) -> Self {
             Self {
                 balances: Mapping::default(),
                 total_supply: 0,
                 retired_supply: 0,
-                authority,
+                converter,
             }
         }
 
@@ -89,7 +89,7 @@ mod carbon_credit_token {
             amount: u128,
             project_id: u64,
         ) -> Result<(), CarbonError> {
-            if self.env().caller() != self.authority {
+            if self.env().caller() != self.converter {
                 return Err(CarbonError::Unauthorized);
             }
             if amount == 0 {
@@ -222,8 +222,8 @@ mod carbon_credit_token {
 
         // Endereço da autoridade emissora de créditos de carbono.
         #[ink(message)]
-        pub fn authority(&self) -> AccountId {
-            self.authority
+        pub fn converter(&self) -> AccountId {
+            self.converter
         }
     }
 
@@ -238,7 +238,7 @@ mod carbon_credit_token {
         //! de créditos de carbono.
         //!
         //! Escopo dos testes unitários:
-        //! - Controle de acesso para emissão (authority)
+        //! - Controle de acesso para emissão (converter)
         //! - Emissão correta de créditos de carbono
         //! - Transferência entre contas
         //! - Aposentadoria (retirement) de créditos
@@ -268,11 +268,11 @@ mod carbon_credit_token {
         /// - Garantir configuração inicial correta
         /// - Validar governança básica do contrato
         #[ink::test]
-        fn constructor_sets_authority() {
+        fn constructor_sets_converter() {
             let acc = accounts();
             let token = CarbonCreditToken::new(acc.alice);
 
-            assert_eq!(token.authority(), acc.alice);
+            assert_eq!(token.converter(), acc.alice);
             assert_eq!(token.total_supply(), 0);
             assert_eq!(token.retired_supply(), 0);
         }
@@ -284,7 +284,7 @@ mod carbon_credit_token {
         /// - Validar controle de acesso
         /// - Garantir atualização correta de saldo e supply
         #[ink::test]
-        fn mint_credit_by_authority_works() {
+        fn mint_credit_by_converter_works() {
             let acc = accounts();
             let mut token = CarbonCreditToken::new(acc.alice);
 
@@ -304,7 +304,7 @@ mod carbon_credit_token {
         /// Objetivo:
         /// - Impedir emissão arbitrária de créditos
         #[ink::test]
-        fn mint_credit_by_non_authority_fails() {
+        fn mint_credit_by_non_converter_fails() {
             let acc = accounts();
             let mut token = CarbonCreditToken::new(acc.alice);
 
@@ -409,7 +409,7 @@ mod carbon_credit_token {
             let acc = accounts();
             let token = CarbonCreditToken::new(acc.alice);
 
-            assert_eq!(token.authority(), acc.alice);
+            assert_eq!(token.converter(), acc.alice);
             assert_eq!(token.balance_of(acc.bob), 0);
             assert_eq!(token.total_supply(), 0);
             assert_eq!(token.retired_supply(), 0);
